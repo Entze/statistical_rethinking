@@ -1,0 +1,13 @@
+name = "statistical_rethinking"
+uuid = "77d4adeb-c15b-4d56-a94c-42c342f68965"
+authors = ["Lukas Grassauer <lukas@grassauer.eu> and contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1.7"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
