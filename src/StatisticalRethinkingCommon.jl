@@ -1,9 +1,11 @@
 module StatisticalRethinkingCommon
 
+using Gen
+using Statistics
 import StatsBase
 using StatsBase: fit, ZScoreTransform
 
-export vectorlist_to_matrix, standardize_columns, standardize_columns!, standardize_column, standardize_column!
+export vectorlist_to_matrix, vector_to_columnmatrix, vector_to_rowmatrix, standardize_columns, standardize_columns!, standardize_column, standardize_column!, sequential_sampling, sampling, mcmc, infer
 
 function vectorlist_to_matrix(list_of_vectors)
     dim1 = length(list_of_vectors)
@@ -16,6 +18,14 @@ function vectorlist_to_matrix(list_of_vectors)
         end
     end
     return matrix
+end
+
+function vector_to_columnmatrix(vector)
+    return reshape(vector, (length(vector), 1))
+end
+
+function vector_to_rowmatrix(vector)
+    return reshape(vector, (1, length(vector)))
 end
 
 function standardize_columns(dataframe, columnsels; center=true, scale=true)
@@ -43,26 +53,69 @@ function standardize_column!(dataframe, columnsel; center=true, scale=true)
     return dt
 end
 
-function mcmc(model, modelargs, observations=Gen.EmptyChoiceMap(), warmup=0, steps=100, kernel=Gen.mh())
+function sequential_sampling(model, modelargs=(), observations=Gen.EmptyChoiceMap(); steps=100, samples=1)
+    return [Gen.importance_resampling(model, modelargs, observations, samples)[1] for _ in 1:steps]
+end
+
+function sampling(model, modelargs=(), observations=Gen.EmptyChoiceMap();steps=100, samples=1)
+    lk = ReentrantLock()
+    traces = []
+    Threads.@threads for _ in 1:steps
+        trace, = Gen.importance_resampling(model, modelargs, observations, samples)
+        lock(lk) do
+            push!(traces, trace)
+        end
+    end
+    return traces
+end
+
+function mcmc(model, modelargs=(), observations=Gen.EmptyChoiceMap(); selection=nothing, warmup=0, steps=100, kernel=Gen.mh, check=false)
     trace, = Gen.generate(model, modelargs, observations)
+
+    if isnothing(selection)
+        obs = []
+        for (addr,) in Gen.get_values_shallow(observations)
+            push!(obs, addr)
+        end
+        selection = Gen.complement(Gen.select(obs...))
+    end
 
     warmup_num_accepted = 0
     warmup_traces = []
-    for i in 1:warmup
-        trace,accepted = kernel(trace, observations=observations)
-        append!(warmup_traces, trace)
+    for _ in 1:warmup
+        trace,accepted = kernel(trace, selection, observations=observations, check=check)
+        push!(warmup_traces, trace)
         warmup_num_accepted += Int64(accepted)
     end
 
-    traces = []
     num_accepted = 0
-    for i in 1:steps
-        trace,accepted = kernel(trace, observations=observations)
-        append!(traces, trace)
+    traces = []
+    for _ in 1:steps
+        trace,accepted = kernel(trace, selection, observations=observations, check=check)
+        push!(traces, trace)
         accepted += Int64(accepted)
     end
 
     return traces, num_accepted, warmup_traces, warmup_num_accepted
+end
+
+function infer(traces, model, modelargs=(), parameter_addresses=(); combine=(p -> mean(p, dims=1)))
+    choicemaps = Gen.get_choices.(traces)
+    parameter_collection = []
+    for (i, address) in enumerate(parameter_addresses)
+        if i == 1
+            parameter_collection = vector_to_columnmatrix(Gen.get_value.(choicemaps, address))
+            continue
+        end
+        parameter_collection = hcat(parameter_collection, vector_to_columnmatrix(Gen.get_value.(choicemaps, address)))
+    end
+    parameters = combine(parameter_collection)
+    constraints = Gen.choicemap()
+    for (i,address) in enumerate(parameter_addresses)
+        constraints[address] = parameters[i]
+    end
+    new_trace = Gen.generate(model, modelargs, constraints)
+    return new_trace
 end
 
 end
