@@ -4,6 +4,7 @@ using Gen
 using Statistics
 import StatsBase
 using StatsBase: fit, ZScoreTransform
+using ProgressMeter
 
 export vectorlist_to_matrix, vector_to_columnmatrix, vector_to_rowmatrix, standardize_columns, standardize_columns!, standardize_column, standardize_column!, sequential_sampling, sampling, mcmc, infer
 
@@ -57,20 +58,36 @@ function sequential_sampling(model, modelargs=(), observations=Gen.EmptyChoiceMa
     return [Gen.importance_resampling(model, modelargs, observations, samples)[1] for _ in 1:steps]
 end
 
-function sampling(model, modelargs=(), observations=Gen.EmptyChoiceMap();steps=100, samples=1)
+function sampling(model, modelargs=(), observations=Gen.EmptyChoiceMap(); steps=100, samples=1, progress=nothing)
+    if !isnothing(progress) && progress isa Bool && progress
+        progress = Progress(steps * samples, desc="Sampling: " , showspeed=true)
+    end
     lk = ReentrantLock()
     traces = []
+    lml_ests = []
     Threads.@threads for _ in 1:steps
-        trace, = Gen.importance_resampling(model, modelargs, observations, samples)
+        trace,lml_est = Gen.importance_resampling(model, modelargs, observations, samples)
         lock(lk) do
             push!(traces, trace)
+            push!(lml_ests, lml_est)
+            if !isnothing(progress) && progress isa Progress
+                update!(progress, samples)
+            end
         end
     end
-    return traces
+
+    if !isnothing(progress) && progress isa Progress
+        finish!(progress)
+    end
+    return traces, lml_ests
 end
 
-function mcmc(model, modelargs=(), observations=Gen.EmptyChoiceMap(); selection=nothing, warmup=0, steps=100, kernel=Gen.mh, check=false)
+function mcmc(model, modelargs=(), observations=Gen.EmptyChoiceMap(); selection=nothing, warmup=0, steps=100, kernel=Gen.mh, check=false, progress=nothing)
     trace, = Gen.generate(model, modelargs, observations)
+
+    if !isnothing(progress) && progress isa Bool && progress
+        progress = Progress(warmup + steps, desc="Prewarmup: " , showspeed=true)
+    end
 
     if isnothing(selection)
         obs = []
@@ -80,12 +97,23 @@ function mcmc(model, modelargs=(), observations=Gen.EmptyChoiceMap(); selection=
         selection = Gen.complement(Gen.select(obs...))
     end
 
+    if !isnothing(progress) && progress isa Progress
+        update!(progress, 0, desc="Warmup:    ")
+    end
+
     warmup_num_accepted = 0
     warmup_traces = []
     for _ in 1:warmup
         trace,accepted = kernel(trace, selection, observations=observations, check=check)
         push!(warmup_traces, trace)
-        warmup_num_accepted += Int64(accepted)
+        warmup_num_accepted += Int(accepted)
+        if !isnothing(progress) && progress isa Progress
+            next!(progress)
+        end
+    end
+
+    if !isnothing(progress) && progress isa Progress
+        update!(progress, 0, desc="MCMC:      ")
     end
 
     num_accepted = 0
@@ -93,8 +121,16 @@ function mcmc(model, modelargs=(), observations=Gen.EmptyChoiceMap(); selection=
     for _ in 1:steps
         trace,accepted = kernel(trace, selection, observations=observations, check=check)
         push!(traces, trace)
-        accepted += Int64(accepted)
+        num_accepted += Int(accepted)
+        if !isnothing(progress) && progress isa Progress
+            next!(progress)
+        end
     end
+
+    if !isnothing(progress) && progress isa Progress
+        finish!(progress)
+    end
+
 
     return traces, num_accepted, warmup_traces, warmup_num_accepted
 end
